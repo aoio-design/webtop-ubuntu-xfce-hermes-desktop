@@ -51,7 +51,7 @@ docker compose exec desktop tail -f /config/logs/firstboot.log
 ```
 
 The desktop is usable in under a minute. The agent takes a few minutes longer
-(about 1 GB of download and a desktop-app build) and then appears on the desktop,
+(about 2.5 GB and a desktop-app build) and then appears on the desktop,
 already running at your next login.
 
 ### After the agent finishes installing
