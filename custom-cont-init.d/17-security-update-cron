@@ -1,0 +1,43 @@
+#!/usr/bin/with-contenv bash
+# =============================================================================
+# 17-security-update-cron — the daily security patch run
+# =============================================================================
+# The boot run (07-security-update) only covers a machine that restarts. A cloud
+# computer is usually left running for weeks, which is exactly the window in which
+# an advisory published after the image was built stays unpatched on it. This
+# puts the same updater on the machine's own cron, daily.
+#
+# 03:30 UTC = 11:30 SGT: after the Monday components report and the weekly
+# cloudflared update (10:40 SGT), so the three never overlap, and far from the
+# 09:00 SGT hour when a buyer is most likely to be sitting at the desktop.
+#
+# It rewrites an existing line rather than skipping one (the same lesson as hook
+# 18/19): a hook that only appends can never migrate a machine that already has
+# the job on a different schedule.
+#
+# Runs through cron-notify.sh, which forwards the script's output to the owner's
+# chat. The updater is silent unless it failed.
+set -u
+CRONTAB=/config/crontabs/abc
+LINE='30 3 * * * HOME=/config PATH=/usr/local/bin:/usr/bin:/bin /config/cron-notify.sh security-update /usr/local/bin/aoio-security-update'
+
+[[ -f "$CRONTAB" ]] || { echo "security-update-cron: $CRONTAB not found, nothing to do"; exit 0; }
+[[ -x /usr/local/bin/aoio-security-update ]] || { echo "security-update-cron: updater not installed, skipping"; exit 0; }
+
+if grep -q 'aoio-security-update' "$CRONTAB"; then
+  if grep -qxF "$LINE" "$CRONTAB"; then
+    echo "security-update-cron: daily line already in place"
+    exit 0
+  fi
+  tmp=$(mktemp) || exit 0
+  sed "s|^[^#].*aoio-security-update.*\$|$LINE|" "$CRONTAB" >"$tmp" \
+    && cat "$tmp" >"$CRONTAB" && rm -f "$tmp"
+  echo "security-update-cron: schedule set to daily 03:30 UTC = 11:30 SGT"
+  exit 0
+fi
+
+{
+  printf '\n# Applies Ubuntu security updates only, daily. Silent unless it fails.\n'
+  printf '%s\n' "$LINE"
+} >>"$CRONTAB"
+echo "security-update-cron: cron line added (daily 03:30 UTC = 11:30 SGT)"

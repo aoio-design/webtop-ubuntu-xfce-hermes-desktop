@@ -1,0 +1,156 @@
+#!/bin/bash
+# =============================================================================
+# aoio-firstboot-install — one real install of the Hermes Agent CLI + desktop app
+# =============================================================================
+# Baked into the image at /usr/local/bin/aoio-firstboot-install and started in
+# the background by /custom-cont-init.d/90-firstboot. Also usable by hand:
+#
+#   docker exec <container> /usr/local/bin/aoio-firstboot-install
+#   docker exec -e AOIO_FIRSTBOOT_DRYRUN=1 <container> /usr/local/bin/aoio-firstboot-install
+#
+# WHAT IT DOES
+#   Downloads Nous Research's official installer and runs it once, non-
+#   interactively, with the desktop product selected:
+#
+#     curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/install.sh
+#     bash /tmp/install.sh --dir /agent-home/hermes-agent \
+#                         --hermes-home /agent-home/.hermes \
+#                         --include-desktop --non-interactive --verbose
+#
+#   `--include-desktop` is the installer's own documented way to build the
+#   desktop app (it selects the desktop product inside the `products` stage).
+#   If that stage is skipped or interrupted, this script falls back to the app's
+#   own entry point for the same job, which is `hermes desktop --build-only`
+#   (verified with `hermes desktop --help` on the live box, 27 Sep 2026).
+#
+#   `--non-interactive` is required, not cosmetic: without it the installer's
+#   final stages run `hermes setup` / `hermes gateway install` and wait on
+#   /dev/tty, which in a container blocks forever. Setup is the buyer's job —
+#   they do it in the desktop app, on their own keys.
+#
+# IT RUNS AS abc, NOT ROOT
+#   Everything it creates lives on the mounted volume (/config). Root-owned files
+#   there break the desktop user and the agent later on, so if invoked as root it
+#   re-executes itself as abc first (root is what `docker exec` gives you, and
+#   dropping privileges here is what makes the manual invocation above produce the
+#   same result as the boot hook).
+#
+# IDEMPOTENT + INTERRUPTIBLE
+#   Exits immediately when the CLI is already installed. Everything lands on the
+#   volume, so an interrupted run is resumed by the next boot. The official
+#   installer moves an interrupted clone aside rather than reusing it.
+#
+# AOIO_FIRSTBOOT_DRYRUN=1 prints the exact commands and downloads nothing.
+
+set -u
+
+if [ "$(id -u)" = "0" ]; then
+  exec s6-setuidgid abc "$0" "$@"
+fi
+
+export HOME=/config
+export HERMES_HOME=/config/.hermes
+export HERMES_INSTALL_DIR=/config/hermes-agent
+export PATH="/config/.local/bin:/usr/local/bin:/usr/bin:/bin"
+export UV_NO_CONFIG=1
+export DEBIAN_FRONTEND=noninteractive
+
+CLI=/config/.local/bin/hermes
+INSTALL_DIR="$HERMES_INSTALL_DIR"
+DESKTOP_BIN="$INSTALL_DIR/apps/desktop/release/linux-unpacked/Hermes"
+INSTALLER_URL=https://hermes-agent.nousresearch.com/install.sh
+INSTALLER_TMP=/tmp/aoio-hermes-install.sh
+DRYRUN="${AOIO_FIRSTBOOT_DRYRUN:-0}"
+
+stamp() { printf '%s firstboot-install: %s\n' "$(date -Is)" "$*"; }
+
+if [ "$DRYRUN" = "1" ]; then
+  stamp "DRY RUN — nothing below is executed, no download is made"
+  cat <<EOF
+# 1. fetch the official installer
+curl -fsSL $INSTALLER_URL -o $INSTALLER_TMP
+# 2. install the CLI and build the desktop app, non-interactively
+HOME=$HOME HERMES_HOME=$HERMES_HOME bash $INSTALLER_TMP \\
+    --dir $INSTALL_DIR \\
+    --hermes-home $HERMES_HOME \\
+    --include-desktop --non-interactive --verbose
+# 3. only if the products stage did not produce a desktop build:
+$CLI desktop --build-only
+# 4. verify
+$CLI --version
+git -C $INSTALL_DIR rev-parse --short HEAD
+test -x $DESKTOP_BIN && echo desktop-app-ok
+EOF
+  stamp "DRY RUN complete"
+  exit 0
+fi
+
+if [ -x "$CLI" ] && [ -x "$DESKTOP_BIN" ]; then
+  stamp "already installed ($("$CLI" --version 2>/dev/null | head -1)) — nothing to do"
+  exit 0
+fi
+
+START_TS="$(date +%s)"
+stamp "installing: dir=$INSTALL_DIR hermes-home=$HERMES_HOME home=$HOME (as $(id -un))"
+
+stamp "step 1/4: fetching $INSTALLER_URL"
+if ! curl -fsSL "$INSTALLER_URL" -o "$INSTALLER_TMP"; then
+  stamp "FAIL: could not download the installer — the next boot will try again"
+  exit 1
+fi
+stamp "step 1/4: ok ($(wc -c < "$INSTALLER_TMP") bytes)"
+
+stamp "step 2/4: running the installer (this is the ~1 GB, several-minute step)"
+bash "$INSTALLER_TMP" \
+  --dir "$INSTALL_DIR" \
+  --hermes-home "$HERMES_HOME" \
+  --include-desktop --non-interactive --verbose
+RC=$?
+stamp "step 2/4: installer exited $RC"
+
+if [ ! -x "$CLI" ]; then
+  stamp "FAIL: no CLI at $CLI after the installer — see the log above; the next boot will retry"
+  exit 1
+fi
+stamp "step 2/4: CLI present — $("$CLI" --version 2>/dev/null | head -1)"
+
+stamp "step 3/4: checking the desktop app"
+if [ -x "$DESKTOP_BIN" ]; then
+  stamp "step 3/4: desktop app already built at $DESKTOP_BIN"
+else
+  stamp "step 3/4: products stage did not produce the desktop app — running '$CLI desktop --build-only'"
+  "$CLI" desktop --build-only || stamp "FAIL: desktop build failed — the next boot will retry it"
+fi
+
+stamp "step 4/4: verifying"
+COMMIT="$(git -c safe.directory='*' -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null || echo '?')"
+stamp "hermes-agent checkout: $INSTALL_DIR @ $COMMIT"
+if [ -x "$DESKTOP_BIN" ]; then
+  stamp "desktop app: $DESKTOP_BIN"
+else
+  stamp "desktop app: MISSING"
+fi
+
+# REQUIRED, not cosmetic: the desktop app is Electron, and inside a container
+# Electron's sandbox cannot initialise ("Failed to move to new namespace: …
+# Operation not permitted"). The app's own supported switch is --no-sandbox, set
+# through the app's own config, so the setting is inherited by the launcher entry
+# the app writes for itself the first time a window opens.
+stamp "step 4/4: setting desktop.electron_flags --no-sandbox (required in a container)"
+"$CLI" config set desktop.electron_flags '["--no-sandbox"]' 2>&1 | sed 's/^/  /' \
+  || stamp "WARN: could not set desktop.electron_flags — the app may refuse to start"
+stamp "desktop.electron_flags: $("$CLI" config get desktop.electron_flags 2>/dev/null || echo unset)"
+
+# Cosmetic: give the Desktop / panel entries something better than a blank icon.
+# abc has passwordless sudo inside this container (LinuxServer default); a
+# failure here must never fail the install.
+if [ -f "$INSTALL_DIR/apps/desktop/assets/icon.png" ]; then
+  sudo -n cp "$INSTALL_DIR/apps/desktop/assets/icon.png" /usr/share/icons/hicolor/256x256/apps/hermes.png 2>/dev/null \
+    && sudo -n gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 \
+    && stamp "icon: installed hermes.png into the icon theme" \
+    || stamp "icon: skipped (cosmetic only)"
+fi
+
+END_TS="$(date +%s)"
+stamp "done in $((END_TS - START_TS))s — the desktop launcher and the scheduled tick work from here"
+exit 0

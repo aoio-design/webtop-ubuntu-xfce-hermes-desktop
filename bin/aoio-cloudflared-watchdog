@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Idempotently start the buyer's remotely-managed Cloudflare Tunnel.
+# Called once during boot and every minute by the existing abc crontab.
+# cloudflared reads its token from a mode-0600 file; output is suppressed so
+# neither routine logs nor connector diagnostics can echo credential material.
+
+set -u
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+TOKEN_FILE=/config/.cloudflared/tunnel-token
+LOCK_FILE=/config/.cloudflared/watchdog.lock
+# Prefer the copy on the buyer's volume (the daily updater replaces that file
+# without an image rebuild) and fall back to the one baked into the image, which
+# 12-cloudflared-volume keeps consistent. AOIO_CLOUDFLARED_BIN overrides both.
+if [ -n "${AOIO_CLOUDFLARED_BIN:-}" ]; then
+  CLOUDFLARED_BIN="$AOIO_CLOUDFLARED_BIN"
+elif [ -x /config/bin/cloudflared ]; then
+  CLOUDFLARED_BIN=/config/bin/cloudflared
+else
+  CLOUDFLARED_BIN=/usr/bin/cloudflared
+fi
+
+[ -s "$TOKEN_FILE" ] || exit 0
+[ -x "$CLOUDFLARED_BIN" ] || exit 0
+
+umask 077
+exec 9>"$LOCK_FILE" || exit 0
+flock -n 9 || exit 0
+
+# A matching non-zombie connector is enough. pgrep can briefly see a dead
+# process while init is reaping it; do not let a zombie block the next restart.
+# The bracketed token prevents pgrep from matching this watchdog command line.
+while IFS= read -r pid; do
+  state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+  if [ -n "$state" ] && [ "${state:0:1}" != Z ]; then
+    exit 0
+  fi
+done < <(pgrep -u abc -f '[t]unnel.*run.*--token-file /config/.cloudflared/tunnel-token' || true)
+
+# Start under a new session so the one-shot hook / cron shell can exit. No
+# token is placed in argv, and stdout/stderr are intentionally not persisted.
+setsid "$CLOUDFLARED_BIN" tunnel run --token-file "$TOKEN_FILE" \
+  9>&- </dev/null >/dev/null 2>&1 &
+exit 0

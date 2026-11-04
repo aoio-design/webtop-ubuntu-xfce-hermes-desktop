@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Hermes Agent
+Comment=Your AI agent, with its own desktop app
+Exec=/config/start-hermes-desktop.sh
+Icon=hermes
+Terminal=false
+StartupNotify=false
+Categories=Utility;

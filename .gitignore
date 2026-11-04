@@ -1,0 +1,13 @@
+# Runtime data — never commit a machine's home folder or the agent's credentials.
+# Anchored to the repository root on purpose: an unanchored `config/` would also
+# exclude seed/config/, which is the payload that ships INSIDE the image.
+/config/
+/shared/
+
+# Build and local test leftovers
+*.log
+/test/
+/staging-*/
+__pycache__/
+*.pyc
+.DS_Store

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Chromium Web Browser
+GenericName=Web Browser
+Comment=Browse the web from your cloud computer
+Exec=/usr/local/bin/wrapped-chromium
+Icon=chromium
+Terminal=false
+Categories=Network;WebBrowser;
+StartupNotify=true
+StartupWMClass=chromium

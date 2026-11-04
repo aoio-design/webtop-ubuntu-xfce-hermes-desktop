@@ -1,0 +1,93 @@
+#!/usr/bin/with-contenv bash
+# =============================================================================
+# 10-seed-config — put the image's payload onto the buyer's MOUNTED /config
+# =============================================================================
+# THE ONE DESIGN POINT THIS IMAGE TURNS ON:
+#
+#   /config is a BIND MOUNT. Anything the Dockerfile writes at that path is
+#   hidden the moment the mount lands: a buyer would boot into an empty /config
+#   — no crontab, no Downloads folder, no clock question — and would see nothing
+#   wrong in the build log.
+#
+# So the payload is baked at /seed (an image path nothing mounts over) and copied
+# into /config HERE, at every container start, ONLY WHEN THE TARGET IS ABSENT.
+# That last clause is what makes a restart and a recreate safe: a container that
+# is stopped and started again finds its own files already in place and re-seeds
+# nothing, so the buyer's edits — their crontab lines, their time zone, their
+# own desktop entries and agent home — always survive.
+#
+# Order matters: LinuxServer runs /custom-cont-init.d/* in filename order and
+# init-services waits for this hook, so 20-crontab-install and 40-hermes-glue
+# both run after the files they need exist.
+
+set -u
+
+SEED=/seed
+LOG=/config/logs/seed.log
+
+mkdir -p /config/logs 2>/dev/null || true
+# Plain function, not `log`, so the text is greppable in both the container log
+# and the file.
+seed_log() { printf '%s seed: %s\n' "$(date -Is)" "$*" | tee -a "$LOG"; }
+
+# Ownership: the desktop user is `abc`, whose uid/gid PUID/PGID set at runtime.
+# id(1) is authoritative because LinuxServer's init-adduser has already run by the
+# time init-custom-files does (init-os-end -> init-adduser).
+PU="$(id -u abc 2>/dev/null || echo "${PUID:-10000}")"
+PG="$(id -g abc 2>/dev/null || echo "${PGID:-10000}")"
+
+# seed_file SRC DST [MODE] — copy only when DST is absent.
+seed_file() {
+  local src="$1" dst="$2" mode="${3:-}"
+  if [ -e "$dst" ]; then
+    seed_log "keep   $dst (already present on the volume)"
+  else
+    mkdir -p "$(dirname "$dst")" || { seed_log "FAIL mkdir $(dirname "$dst")"; return 1; }
+    cp -p "$src" "$dst" || { seed_log "FAIL copy $src -> $dst"; return 1; }
+    seed_log "seeded $dst"
+  fi
+  [ -n "$mode" ] && chmod "$mode" "$dst" 2>/dev/null
+  chown "$PU:$PG" "$dst" 2>/dev/null
+  return 0
+}
+
+# --- directories the desktop, cron and the Guide expect ----------------------
+# /config/Desktop/Downloads is the folder the Guide tells the owner their project
+# files live in, one sub-folder per project, and the folder the Selkies Files
+# panel opens on. Nothing else creates it: the base image ships no ~/Downloads
+# and no user-dirs.dirs, so without these lines the path the Guide names does not
+# exist on a fresh machine.
+for d in /config/Desktop /config/Desktop/Downloads /config/crontabs /config/logs \
+         /config/.config/autostart; do
+  mkdir -p "$d" 2>/dev/null && chown "$PU:$PG" "$d" 2>/dev/null
+done
+
+# --- /config payload --------------------------------------------------------
+seed_file "$SEED/config/crontabs/abc"                /config/crontabs/abc                644
+seed_file "$SEED/config/cron-notify.sh"              /config/cron-notify.sh              755
+seed_file "$SEED/config/Desktop/chromium.desktop"    /config/Desktop/chromium.desktop    755
+# The Hermes launcher: one script, two entries (a clickable icon on the desktop,
+# and a quiet autostart that says nothing until the first-boot install exists).
+# Seeded rather than baked into /config so a fix to the launcher ships inside a
+# container update instead of needing to be hand-edited on somebody's machine.
+seed_file "$SEED/config/start-hermes-desktop.sh"     /config/start-hermes-desktop.sh     755
+seed_file "$SEED/config/Desktop/hermes-agent.desktop" /config/Desktop/hermes-agent.desktop 755
+seed_file "$SEED/config/.config/autostart/hermes-agent.desktop" \
+                                                     /config/.config/autostart/hermes-agent.desktop 755
+# Mode 755 on the desktop entries is re-enforced on EVERY boot, not just at seed
+# time. XFCE refuses to run a .desktop file it considers untrusted and greys it
+# out with "Untrusted application launcher"; on this filesystem (overlayfs backed
+# by a bind mount) `gio set metadata::trusted true` is not supported, so the mode
+# bit is the only lever there is. Anything that rewrites these files — a copy, an
+# upload, an agent editing them — can clear it, so the invariant is re-asserted
+# here rather than assumed.
+chmod 755 /config/Desktop/*.desktop 2>/dev/null
+
+# --- nothing Hermes-related is seeded ---------------------------------------
+# The agent's home ($HOME/.hermes) and anything under it — skills, config, the
+# studio — belong to the buyer's own install, not to this image. A pre-created
+# directory here would be a second, empty home that a later install can trip
+# over. The one exception, deliberately, is a single ownership sweep in
+# 40-hermes-glue, and only over a home that already exists.
+
+exit 0

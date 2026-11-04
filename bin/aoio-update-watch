@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""webtop-update-watch — tell you when a newer version of your Webtop desktop
+image has been published.
+
+How it works: it asks the public image registry for the digest of the current
+`latest` image and compares it with the digest it saw last time. A new digest
+means a new version was published. On the first run it records a baseline and
+says nothing.
+
+Silent by default. It sends one Telegram message per published version — never a
+reminder, never a digest — and says nothing when the machine has just been updated
+by hand. If Telegram is not configured it stays silent and logs to
+~/.cloud-computer-update-watch.log instead.
+
+Run by cron (added at boot by 18-update-watch). Can also be run by hand:
+  docker exec <container> /usr/local/bin/aoio-update-watch
+"""
+
+import json
+import os
+import sys
+import time
+import urllib.parse
+import urllib.request
+
+REGISTRY = "ghcr.io"
+REPO = "aoio-design/webtop-ubuntu-xfce-hermes-desktop"
+TAG = "latest"
+
+HOME = os.path.expanduser("~") or "/config"
+STATE = os.path.join(HOME, ".cloud-computer-update-watch.json")
+# What image this machine is actually running, written at build time.
+BUILD_INFO = "/etc/aoio-image-build-info"
+LOG = os.path.join(HOME, ".cloud-computer-update-watch.log")
+ENV_FILE = os.path.join(HOME, ".hermes", ".env")
+
+MANIFEST_ACCEPT = ", ".join((
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+))
+
+MESSAGE = """A new version of your Webtop desktop is ready.
+
+Before you update: finish any task you have running in the desktop or with your agent. The desktop closes for about two minutes while the new version starts. Your files and your agent are not affected — they live in the mounted /config folder.
+
+To update:
+1. Pull the new image:   docker compose pull
+2. Recreate it:          docker compose up -d
+3. Reopen your usual address after about two minutes.
+
+The Hermes Agent is not part of the image, so it updates itself separately: open its terminal and run 'hermes update' when it tells you a release is out."""
+
+
+def log(text):
+    try:
+        with open(LOG, "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {text}\n")
+    except OSError:
+        pass
+
+
+def installed_build():
+    """The build stamp of the image this machine is running, or "" if unreadable."""
+    try:
+        with open(BUILD_INFO, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("built="):
+                    return line.strip()
+    except OSError:
+        pass
+    return ""
+
+
+def published_digest():
+    """The digest of the tag as the registry currently serves it."""
+    token_url = f"https://{REGISTRY}/token?service={REGISTRY}&scope=repository:{REPO}:pull"
+    req = urllib.request.Request(token_url, headers={"User-Agent": "cloud-computer-update-watch"})
+    with urllib.request.urlopen(req, timeout=25) as resp:
+        token = json.load(resp)["token"]
+    req = urllib.request.Request(
+        f"https://{REGISTRY}/v2/{REPO}/manifests/{TAG}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": MANIFEST_ACCEPT,
+            "User-Agent": "cloud-computer-update-watch",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=25) as resp:
+        # The registry states the digest; fall back to hashing the body it sent.
+        digest = resp.headers.get("Docker-Content-Digest")
+        if not digest:
+            import hashlib
+            digest = "sha256:" + hashlib.sha256(resp.read()).hexdigest()
+        return digest.strip()
+
+
+def telegram_credentials():
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat = os.environ.get("TELEGRAM_HOME_CHANNEL", "") or os.environ.get("TELEGRAM_CHAT_ID", "")
+    if token and chat:
+        return token, chat
+    try:
+        with open(ENV_FILE, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("TELEGRAM_BOT_TOKEN=") and not token:
+                    token = line.split("=", 1)[1].strip()
+                elif line.startswith("TELEGRAM_HOME_CHANNEL=") and not chat:
+                    chat = line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return token, chat
+
+
+def send(text):
+    token, chat = telegram_credentials()
+    if not (token and chat):
+        log("no Telegram credentials — message not sent: " + text.splitlines()[0])
+        return False
+    body = urllib.parse.urlencode({"chat_id": chat, "text": text}).encode()
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendMessage", data=body,
+        headers={"User-Agent": "cloud-computer-update-watch"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            return 200 <= resp.status < 300
+    except Exception as exc:                     # noqa: BLE001
+        log(f"send failed: {exc}")
+        return False
+
+
+def load_state():
+    try:
+        with open(STATE, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(state):
+    tmp = STATE + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(STATE), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=1, sort_keys=True)
+        os.replace(tmp, STATE)
+    except OSError as exc:
+        log(f"could not save state: {exc}")
+
+
+def main():
+
+    try:
+        digest = published_digest()
+    except Exception as exc:                     # noqa: BLE001 - stay quiet, log only
+        log(f"registry check failed: {exc}")
+        return 0
+
+    state = load_state()
+    seen = state.get("published_digest")
+    build = installed_build()
+
+    # The machine was updated by hand (the Owner pressed Update) since the last
+    # run. That is not news to report: adopt the published digest as the new
+    # baseline and stay silent, otherwise the next message would announce a
+    # version the Owner is already running.
+    if build and state.get("installed_build") != build:
+        changed_installed = state.get("installed_build")
+        state["installed_build"] = build
+        state["published_digest"] = digest
+        state["rebased_after_update"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        save_state(state)
+        if changed_installed:
+            log(f"machine updated to {build}; baseline moved to {digest}, nothing sent")
+        else:
+            log(f"baseline recorded: {digest} ({build})")
+        return 0
+
+    if not seen:
+        state["published_digest"] = digest
+        state["installed_build"] = build
+        state["first_run"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        save_state(state)
+        log(f"baseline recorded: {digest}")
+        return 0
+
+    if digest != seen:
+        if send(MESSAGE):
+            state["published_digest"] = digest
+            state["last_notified"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            save_state(state)
+            log(f"notified for new digest {digest} (was {seen})")
+        else:
+            # Leave the old digest in place so the next run tries again.
+            log(f"new digest {digest} seen but notification failed; will retry")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

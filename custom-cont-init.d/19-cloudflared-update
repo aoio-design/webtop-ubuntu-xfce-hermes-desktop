@@ -1,0 +1,48 @@
+#!/usr/bin/with-contenv bash
+# 19-cloudflared-update — put the weekly connector updater on the machine's own
+# schedule.
+#
+# WHY A HOOK RATHER THAN A DOC LINE: it has to work for a buyer who never reads
+# an instruction, and it has to survive a container recreate. It sorts BEFORE
+# 20-crontab-install so the file it edits is the one that gets installed on this
+# same boot.
+#
+# WEEKLY SINCE 19 Oct 2026 (was daily). A connector update is a background
+# hygiene job, not an emergency: cloudflared's own release cadence is
+# fortnightly-ish, so a daily check was 13 wasted runs out of 14. Monday 02:40
+# UTC (10:40 SGT) lands just after the Monday 09:00 SGT components report, so
+# the report that says "a new connector exists" is followed by the update that
+# applies it.
+#
+# It REWRITES any existing line rather than skipping when one is found: an
+# earlier version of this hook appended once and then exited, which would have
+# left every buyer who installed before today on the old daily schedule
+# forever. Self-healing beats an install-time one-off.
+#
+# The job runs through cron-notify.sh, which sends the script's output to the
+# owner's chat and sends nothing when the script prints nothing. The updater is
+# silent unless a version failed and was reverted.
+set -u
+CRONTAB=/config/crontabs/abc
+LINE='40 2 * * 1 HOME=/config PATH=/usr/local/bin:/usr/bin:/bin /config/cron-notify.sh cloudflared-update /usr/local/bin/aoio-cloudflared-update'
+
+[[ -f "$CRONTAB" ]] || { echo "cloudflared-update: $CRONTAB not found, nothing to do"; exit 0; }
+[[ -x /usr/local/bin/aoio-cloudflared-update ]] || { echo "cloudflared-update: updater not installed, skipping"; exit 0; }
+
+if grep -q 'aoio-cloudflared-update' "$CRONTAB"; then
+  if grep -qxF "$LINE" "$CRONTAB"; then
+    echo "cloudflared-update: weekly line already in place"
+    exit 0
+  fi
+  tmp=$(mktemp) || exit 0
+  sed "s|^[^#].*aoio-cloudflared-update.*\$|$LINE|" "$CRONTAB" >"$tmp" \
+    && cat "$tmp" >"$CRONTAB" && rm -f "$tmp"
+  echo "cloudflared-update: schedule migrated to weekly (Mon 02:40 UTC = 10:40 SGT)"
+  exit 0
+fi
+
+{
+  printf '\n# Keeps the Cloudflare connector current on its own, weekly. Silent unless an update fails.\n'
+  printf '%s\n' "$LINE"
+} >>"$CRONTAB"
+echo "cloudflared-update: cron line added (weekly Mon 02:40 UTC = 10:40 SGT)"

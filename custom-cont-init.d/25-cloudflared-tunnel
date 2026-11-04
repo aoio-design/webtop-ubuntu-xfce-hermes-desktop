@@ -1,0 +1,51 @@
+#!/usr/bin/with-contenv bash
+# Install the buyer's tunnel-specific token privately and ask the watchdog to
+# start the remotely-managed connector. A blank or obvious sample placeholder
+# disables the tunnel and removes any token left on the persistent /config.
+
+set -u
+
+TOKEN="${CLOUDFLARE_TUNNEL_TOKEN:-}"
+TUNNEL_DIR=/config/.cloudflared
+TOKEN_FILE="$TUNNEL_DIR/tunnel-token"
+
+shopt -s nocasematch
+if [[ -z "$TOKEN" || "$TOKEN" =~ ^(PASTE_|YOUR_|REPLACE_|CHANGE_ME|<.*>|\$\{.*\}) ]]; then
+  if [ -d "$TUNNEL_DIR" ]; then
+    rm -f "$TOKEN_FILE"
+  fi
+  echo "cloudflared-boot: no usable tunnel token configured; tunnel remains disabled"
+  exit 0
+fi
+shopt -u nocasematch
+
+# Fail closed if the token is set but the desktop password is blank or still a
+# sample value. The public desktop must not start with a default password.
+shopt -s nocasematch
+PASSWORD_VALUE="${PASSWORD:-}"
+if [[ -z "$PASSWORD_VALUE" || "$PASSWORD_VALUE" =~ ^(CHANGE[-_]ME|PASTE_|YOUR_|REPLACE_|CHOOSE[-_]) ]]; then
+  rm -f "$TOKEN_FILE"
+  unset PASSWORD_VALUE TOKEN CLOUDFLARE_TUNNEL_TOKEN
+  echo "cloudflared-boot: desktop password is blank or a sample placeholder; tunnel remains disabled"
+  exit 0
+fi
+unset PASSWORD_VALUE
+shopt -u nocasematch
+
+# The token is written only to the buyer's mounted /config, never echoed or
+# passed on the cloudflared command line. Restrict both directory and file.
+install -d -o abc -g abc -m 700 "$TUNNEL_DIR"
+TOKEN_TMP="$(mktemp "$TUNNEL_DIR/.tunnel-token.XXXXXX")"
+chmod 600 "$TOKEN_TMP"
+printf '%s' "$TOKEN" > "$TOKEN_TMP"
+chown abc:abc "$TOKEN_TMP"
+mv -f "$TOKEN_TMP" "$TOKEN_FILE"
+chmod 600 "$TOKEN_FILE"
+chown abc:abc "$TOKEN_FILE"
+unset TOKEN CLOUDFLARE_TUNNEL_TOKEN
+
+echo "cloudflared-boot: tunnel token stored privately on /config; requesting connector start"
+# This hook is a LinuxServer one-shot and must return promptly. The watchdog
+# starts cloudflared detached; the existing abc crontab checks it every minute.
+s6-setuidgid abc /usr/local/bin/aoio-cloudflared-watchdog
+exit 0

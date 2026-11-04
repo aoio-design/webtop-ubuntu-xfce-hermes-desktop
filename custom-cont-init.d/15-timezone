@@ -1,0 +1,54 @@
+#!/usr/bin/with-contenv bash
+# =============================================================================
+# 15-timezone — put the machine's clock on the buyer's time zone
+# =============================================================================
+# The buyer chooses their city once, from the desktop (bin/aoio-ask-timezone), and
+# the answer is stored on the mounted volume at /config/.timezone. This hook
+# re-applies it at EVERY start, which is what makes the choice survive a container
+# update or recreate: /etc/localtime itself lives in the container's own layer and
+# is wiped by either.
+#
+# Precedence, deliberately:
+#   1. an explicit TZ in the buyer's compose wins — the hook then does nothing
+#      (this is how the seller's own box is set, and how a buyer who prefers a
+#      fixed value can pin it);
+#   2. otherwise, /config/.timezone;
+#   3. otherwise, whatever the image ships (UTC) — a buyer who never answers the
+#      question still gets a working machine.
+#
+# Runs inside LinuxServer's init-custom-files, i.e. before svc-cron and the
+# desktop start, so the clock is already right when the session comes up. Cheap
+# and silent: one symlink, one log line. It never fails the boot.
+#
+#   docker exec <container> cat /config/logs/timezone.log   # what it did
+
+set -u
+
+ZONE_FILE=/config/.timezone
+ZONEINFO=/usr/share/zoneinfo
+LOG=/config/logs/timezone.log
+
+mkdir -p /config/logs 2>/dev/null || true
+tz_log() { printf '%s timezone: %s\n' "$(date -Is)" "$*" >> "$LOG" 2>/dev/null || true; }
+
+if [ -n "${TZ:-}" ] && [ -f "$ZONEINFO/$TZ" ]; then
+  tz_log "compose sets TZ=$TZ — leaving the clock as it is"
+  exit 0
+fi
+
+if [ ! -f "$ZONE_FILE" ]; then
+  exit 0
+fi
+
+ZONE="$(tr -d ' \n' < "$ZONE_FILE" 2>/dev/null || true)"
+if [ -z "$ZONE" ] || [ ! -f "$ZONEINFO/$ZONE" ]; then
+  tz_log "ignoring $ZONE_FILE: '$ZONE' is not a time zone"
+  exit 0
+fi
+
+if ln -sfn "$ZONEINFO/$ZONE" /etc/localtime 2>/dev/null; then
+  tz_log "clock set to $ZONE"
+else
+  tz_log "could not set /etc/localtime to $ZONE"
+fi
+exit 0

@@ -1,0 +1,79 @@
+#!/usr/bin/with-contenv bash
+# =============================================================================
+# 90-firstboot — install the Hermes Agent CLI + desktop app, in the background
+# =============================================================================
+# This is the ONLY step of first boot that needs the network for minutes and a
+# ~1 GB download, so it is deliberately the last hook and it never blocks:
+#
+#   * the desktop (XFCE + Selkies) must come up first — someone who opens the
+#     browser 30 seconds after `docker compose up` gets a working desktop, and
+#     the agent arrives behind it;
+#   * init-custom-files is a oneshot that init-services waits for, so blocking
+#     here would hold the whole desktop hostage to a download;
+#   * the install is detached with setsid, so it survives this hook exiting.
+#
+# WHY AT BOOT RATHER THAN BAKED INTO THE IMAGE: an image built today carries the
+# agent as it was today, forever. Installed at boot, it is the current release on
+# the day you deploy, it lands on the mounted volume so a container recreate
+# keeps it, and this image redistributes none of Nous Research's code.
+#
+# Idempotent and self-healing: it does nothing when the CLI is already there,
+# does nothing while an install is already running, and picks up a half-finished
+# install (CLI present but desktop app not built) by building only the desktop.
+# Interrupting it is safe: everything lands on the mounted volume, and the
+# official installer moves an interrupted clone aside rather than reusing it.
+#
+# AOIO_FIRSTBOOT_DRYRUN=1 logs the exact commands instead of running them.
+#
+# Manual runs, for testing or repair:
+#   docker exec <container> /usr/local/bin/aoio-firstboot-install
+#   docker exec -e AOIO_FIRSTBOOT_DRYRUN=1 <container> /usr/local/bin/aoio-firstboot-install
+#   docker exec <container> tail -f /config/logs/firstboot.log
+
+set -u
+
+CLI=/config/.local/bin/hermes
+INSTALL_DIR=/config/hermes-agent
+DESKTOP_BIN="$INSTALL_DIR/apps/desktop/release/linux-unpacked/Hermes"
+INSTALLER=/usr/local/bin/aoio-firstboot-install
+FIRSTBOOT_LOG=/config/logs/firstboot.log
+DRYRUN="${AOIO_FIRSTBOOT_DRYRUN:-0}"
+
+mkdir -p /config/logs 2>/dev/null || true
+fb_log() { printf '%s firstboot: %s\n' "$(date -Is)" "$*" | tee -a "$FIRSTBOOT_LOG"; }
+
+if [ "$DRYRUN" = "1" ]; then
+  fb_log "AOIO_FIRSTBOOT_DRYRUN=1 — printing the commands instead of running them"
+  AOIO_FIRSTBOOT_DRYRUN=1 "$INSTALLER" 2>&1 | tee -a "$FIRSTBOOT_LOG"
+  exit 0
+fi
+
+if [ -x "$CLI" ] && [ -x "$DESKTOP_BIN" ]; then
+  # safe.directory: this hook runs as root and the checkout belongs to abc, so
+  # git otherwise refuses to read it ("dubious ownership") and the log line would
+  # read "already installed: ?".
+  fb_log "already installed: $(git -c safe.directory='*' -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null || echo '?') — nothing to do"
+  exit 0
+fi
+
+if pgrep -f aoio-firstboot-install >/dev/null 2>&1; then
+  fb_log "an install is already running — nothing to do"
+  exit 0
+fi
+
+if [ -x "$CLI" ] && [ ! -x "$DESKTOP_BIN" ]; then
+  # A previous run was interrupted after the CLI was published. Don't reinstall
+  # everything; build the missing desktop app (the app's own documented
+  # entry point for exactly this: `hermes desktop --build-only`).
+  fb_log "CLI present but no desktop app at $DESKTOP_BIN — building it in the background"
+  setsid nohup s6-setuidgid abc bash -c \
+    "export HOME=/config HERMES_HOME=/config/.hermes PATH=/config/.local/bin:/usr/local/bin:/usr/bin:/bin; '$CLI' desktop --build-only" \
+    >> "$FIRSTBOOT_LOG" 2>&1 < /dev/null &
+  fb_log "desktop build started (pid $!)"
+  exit 0
+fi
+
+fb_log "no Hermes CLI at $CLI — starting the install in the background; the desktop is already up"
+setsid nohup "$INSTALLER" >> "$FIRSTBOOT_LOG" 2>&1 < /dev/null &
+fb_log "installer started (pid $!) — watch it with: tail -f $FIRSTBOOT_LOG"
+exit 0

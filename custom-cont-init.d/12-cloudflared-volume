@@ -1,0 +1,47 @@
+#!/usr/bin/with-contenv bash
+# 12-cloudflared-volume — keep cloudflared on the buyer's volume, not only
+# inside the image layer.
+#
+# WHY: the connector is baked into the image, so its version could only move by
+# rebuilding and republishing a 4.9 GB image. With a copy on /config, the file
+# can be replaced on its own — the way a normal Linux box updates it — and the
+# change survives every container recreate because /config is the buyer's volume.
+#
+# THE RULE: whoever has the NEWER version wins, in both directions. A stale
+# volume copy can never shadow a newer image (which would silently hold the
+# machine back), and a newer volume copy is never overwritten by an older image.
+#
+# The image copy stays in place as the fallback: if the volume copy is missing,
+# unreadable or not executable, this hook restores it. The tunnel therefore
+# comes up on a fresh machine with no download at all.
+set -u
+
+VOL_DIR=/config/bin
+VOL="$VOL_DIR/cloudflared"
+IMG=/usr/bin/cloudflared
+
+ver() { "$1" --version 2>/dev/null | awk '{print $3}'; }
+
+[[ -x "$IMG" ]] || { echo "cloudflared-volume: no image binary at $IMG"; exit 0; }
+mkdir -p "$VOL_DIR" 2>/dev/null
+chown abc:abc "$VOL_DIR" 2>/dev/null
+chmod 755 "$VOL_DIR" 2>/dev/null
+
+# Missing or unusable volume copy: seed it from the image.
+if [[ ! -x "$VOL" ]] || [[ -z "$(ver "$VOL")" ]]; then
+  cp -f "$IMG" "$VOL" && chown abc:abc "$VOL" && chmod 755 "$VOL"
+  echo "cloudflared-volume: seeded $(ver "$VOL") onto $VOL"
+  exit 0
+fi
+
+IV="$(ver "$IMG")"
+VV="$(ver "$VOL")"
+NEWEST="$(printf '%s\n%s\n' "$IV" "$VV" | sort -V | tail -1)"
+
+if [[ -n "$IV" && "$NEWEST" == "$IV" && "$IV" != "$VV" ]]; then
+  cp -f "$IMG" "$VOL" && chown abc:abc "$VOL" && chmod 755 "$VOL"
+  echo "cloudflared-volume: image has $IV, older volume copy had $VV — volume updated to $IV"
+else
+  echo "cloudflared-volume: using volume copy $VV (image carries $IV)"
+fi
+exit 0

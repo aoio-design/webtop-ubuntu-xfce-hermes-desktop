@@ -1,0 +1,38 @@
+#!/usr/bin/with-contenv bash
+# =============================================================================
+# 05-packages — the apt packages the stack needs
+# =============================================================================
+# These packages are BAKED INTO THE IMAGE (see Dockerfile, step 1): git, curl,
+# xz-utils, ca-certificates, imagemagick, x11-apps. The buyer's first boot must
+# not have to reach apt at all, so this hook is normally a fast no-op.
+#
+# It still exists, and still installs, because of the reason the live box's
+# 10-packages hook existed: anything that ends up installed only in the
+# container's own layer disappears when the container is recreated. Baking
+# removes that risk for our six packages, but a buyer (or their agent) can
+# remove one by accident, and a missing `convert`/`xz` breaks film pipelines
+# hours later with an error nobody connects to the image. So: verify, and
+# repair only when something is actually missing.
+#
+# Timeouts are deliberately short. This hook runs inside LinuxServer's
+# init-custom-files, which init-services waits for — a hanging apt here would
+# delay the desktop and the studio, which is exactly what we do not want.
+
+set -u
+
+missing=""
+for bin in git curl xz convert zenity; do
+  command -v "$bin" >/dev/null 2>&1 || missing="$missing $bin"
+done
+
+if [ -z "$missing" ]; then
+  echo "packages: all baked packages present ($(convert --version 2>/dev/null | head -1))"
+  exit 0
+fi
+
+echo "packages: missing$missing — reinstalling (image layer was replaced)"
+timeout 90 apt-get update -qq || { echo "packages: apt-get update failed or timed out"; exit 0; }
+timeout 300 apt-get install -y -qq --no-install-recommends \
+  git curl xz-utils ca-certificates imagemagick x11-apps zenity \
+  || echo "packages: install failed — the stack will report the missing tool when it is used"
+exit 0

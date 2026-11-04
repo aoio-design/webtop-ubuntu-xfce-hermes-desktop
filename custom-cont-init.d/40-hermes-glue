@@ -1,0 +1,147 @@
+#!/usr/bin/with-contenv bash
+# =============================================================================
+# 40-hermes-glue — the ONE Hermes-aware boot hook. It installs NOTHING.
+# =============================================================================
+# Hermes is installed by the buyer, from this machine's own terminal, with Nous
+# Research's official installer. So why does the image need a Hermes-aware hook
+# at all? Because of where the gateway's supervision lives.
+#
+# In ANY container, the messaging gateway is meant to be an s6 service, and the
+# two steps that make that possible belong to the container's boot — upstream's
+# own image does them in its /etc/cont-init.d hooks:
+#
+#   1. cont-init.d/02-reconcile-profiles, part 1 — chown the DYNAMIC scandir
+#      /run/service and the s6-svscan control/lock FIFOs to the service user.
+#      Upstream's comment is explicit: without it "the entire
+#      runtime-registration path is inert under UID 10000", and their Python
+#      wrapper "catches the resulting EACCES, prints a warning, and swallows the
+#      failure". The buyer's own `hermes gateway install` would look like it
+#      worked while no service existed: the gateway would run as a manual
+#      process, messaging would die at the next container restart, and nothing
+#      would say why.
+#   2. The same file, part 2 — run `python -m hermes_cli.container_boot`, which
+#      rebuilds the per-profile gateway slot under /run/service/gateway-<profile>
+#      and auto-starts it when the last recorded state was `running`. /run/service
+#      is tmpfs: wiped on every restart. The agent's home is not. This is what
+#      brings messaging back by itself after a reboot — upstream's code, not ours.
+#
+# Plus two facts of THIS base image, which upstream's image gets from its own
+# Dockerfile and this one has to reproduce at boot:
+#
+#   3. the `hermes` account — the s6 run script Hermes generates drops to it
+#      (`s6-setuidgid hermes`). Created as an ALIAS on the agent user's uid so
+#      every file on the volume stays owned exactly as the desktop sees it.
+#   4. `HERMES_HOME` and a `hermes` on PATH — the generated run script is
+#      `#!/command/with-contenv sh` and rehydrates from /run/s6/container_environment,
+#      and it execs a bare `hermes`. Supervised services never read the buyer's
+#      shell rc files, so both must exist here or the supervised gateway starts
+#      with the wrong home and cannot find the CLI.
+#
+# ORDER: init-custom-files (this directory) is a dependency of init-services in
+# this base, so everything here runs BEFORE the desktop stack starts.
+# IDEMPOTENT: safe on every boot, and safe before Hermes exists — the chowns and
+# the account are exactly what the buyer's later install needs.
+#
+# Cost when there is no Hermes yet: four chowns, one getent and one find.
+
+set -u
+
+AGENT_USER=abc
+AGENT_HOME=/config
+# An explicit HERMES_HOME (compose `environment:`) wins; otherwise the official
+# installer's own default, $HOME/.hermes, which is what a buyer gets by running
+# it with no extra environment. Both live on the /config volume.
+HERMES_HOME_DIR="${HERMES_HOME:-$AGENT_HOME/.hermes}"
+BIN_DIR="$AGENT_HOME/.local/bin"
+ENVDIR=/run/s6/container_environment
+
+log() { echo "[hermes-glue] $*"; }
+
+PU="$(id -u "$AGENT_USER" 2>/dev/null || echo 10000)"
+PG="$(id -g "$AGENT_USER" 2>/dev/null || echo 10000)"
+
+# --- 3. the account upstream's generated run script drops to -----------------
+if ! getent passwd hermes >/dev/null 2>&1; then
+    # -o: a second name for an existing uid, never a second uid. The container
+    # layer is wiped on every recreate, so this reruns each boot and never
+    # conflicts with the buyer's own files.
+    useradd -o -u "$PU" -g "$PG" -d "$AGENT_HOME" -M -s /bin/bash hermes \
+        && log "created 'hermes' alias account (uid $PU, same files as $AGENT_USER)"
+fi
+
+# --- 4. what `with-contenv` gives a supervised service ----------------------
+printf %s "$HERMES_HOME_DIR" > "$ENVDIR/HERMES_HOME"
+CUR_PATH="$(cat "$ENVDIR/PATH" 2>/dev/null || echo /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin)"
+case ":$CUR_PATH:" in
+    *":$BIN_DIR:"*) : ;;
+    *) printf %s "$BIN_DIR:$CUR_PATH" > "$ENVDIR/PATH" ;;
+esac
+
+# `hermes` on the service PATH. /usr/local/bin is already on the image PATH and
+# lives in the container layer (wiped on recreate), so this is re-created at
+# every boot. Written only once the buyer's CLI exists — before that, a shim
+# pointing at nothing would be worse than no shim.
+if [ -x "$BIN_DIR/hermes" ]; then
+    printf '#!/bin/sh\nexec %s "$@"\n' "$BIN_DIR/hermes" > /usr/local/bin/hermes
+    chmod 755 /usr/local/bin/hermes
+fi
+
+# --- 1. the dynamic scandir + the svscan control FIFOs ----------------------
+chown "$AGENT_USER:$AGENT_USER" /run/service
+for e in control lock; do
+    [ -e "/run/service/.s6-svscan/$e" ] && chown "$AGENT_USER:$AGENT_USER" "/run/service/.s6-svscan/$e"
+done
+
+# --- 4b. static s6-rc services: supervise/ + event/ usable as the agent user --
+# s6-supervise creates these root-owned 0700; s6-svc/s6-svstat/s6-svwait all run
+# as the unprivileged user. Upstream does this in cont-init.d/015-supervise-perms.
+find /run/s6-rc/servicedirs -maxdepth 3 -name supervise -exec chown -R "$AGENT_USER:$AGENT_USER" {} + 2>/dev/null || true
+find /run/s6-rc/servicedirs -maxdepth 3 -name supervise -exec chmod 0710 {} + 2>/dev/null || true
+find /run/s6-rc/servicedirs -maxdepth 4 -name control -type p -exec chmod 0660 {} + 2>/dev/null || true
+find /run/s6-rc/servicedirs -maxdepth 3 -name event -exec chown "$AGENT_USER:$AGENT_USER" {} + 2>/dev/null || true
+
+# --- ownership sweep of an EXISTING agent home -------------------------------
+# Upstream's stage2 hook chowns the volume at every boot so a root-run command
+# (docker exec, a host script, an agent's sudo) cannot leave files the agent then
+# cannot write. Bounded: only a home that already exists, and only four levels —
+# enough for logs/, cache/, skills/ and backups/, far short of the media trees.
+if [ -d "$HERMES_HOME_DIR" ]; then
+    find "$HERMES_HOME_DIR" -maxdepth 4 ! -user "$AGENT_USER" \
+        -exec chown "$AGENT_USER:$AGENT_USER" {} + 2>/dev/null || true
+fi
+
+# --- upstream's layout assumption: /opt/data --------------------------------
+# The run script Hermes generates for a gateway slot is written for upstream's
+# own image: it does `export HOME=/opt/data; cd /opt/data`, and upstream mounts
+# the agent's home at exactly that path. On this base the home is
+# $HOME/.hermes = /config/.hermes, so without this symlink `cd` fails under
+# `set -e`, the service exits (code 2), and s6 restarts it forever — a running
+# gateway that never starts, with the only clue buried in the slot's own log.
+# One symlink satisfies the assumption exactly: /opt/data and the agent home
+# become the same directory. Created only once the home exists, and re-created
+# at every boot because /opt lives in the container layer.
+if [ -d "$HERMES_HOME_DIR" ] && [ ! -e /opt/data ]; then
+    ln -s "$HERMES_HOME_DIR" /opt/data \
+        && log "linked /opt/data -> $HERMES_HOME_DIR (the generated slot script assumes it)"
+fi
+
+# --- 2. upstream's own reconciler, once Hermes exists ------------------------
+if [ ! -x "$BIN_DIR/hermes" ]; then
+    log "no Hermes CLI yet — prepared the machine for the buyer's install, nothing to reconcile"
+    exit 0
+fi
+
+s6-setuidgid "$AGENT_USER" env HERMES_HOME="$HERMES_HOME_DIR" HOME="$AGENT_HOME" \
+    "$BIN_DIR/hermes" --run-module hermes_cli.container_boot 2>&1 \
+    | sed 's/^/[hermes-glue] /' || true
+
+# The ONE ordering difference from upstream, and the reason this line exists:
+# upstream runs its reconciler from cont-init.d BEFORE s6-svscan exists ("cont-init.d
+# runs before s6-svscan has a control socket" — hermes_cli/container_boot.py), so the
+# slot it writes is picked up when scanning starts. This base starts s6-svscan as PID 1
+# and runs /custom-cont-init.d INSIDE that tree, so the slot appears while the scandir
+# is already live — and the reconciler rebuilds slots with rmtree+replace, which tears
+# down any live supervisor for that slot. One rescan settles it.
+/command/s6-svscanctl -a /run/service || true
+
+log "done"

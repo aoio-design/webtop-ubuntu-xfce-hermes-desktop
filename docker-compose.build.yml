@@ -1,0 +1,49 @@
+# =============================================================================
+# Build from source instead of pulling the published image.
+# =============================================================================
+# Use this when you want the desktop's platform pieces resolved at DEPLOY time
+# rather than frozen in a published image:
+#
+#   * the webtop base is the upstream floating tag (newest at build time, and
+#     `pull: true` refreshes it before every build)
+#   * Selkies is the newest release on PyPI
+#   * cloudflared is the newest binary this Dockerfile knows about — set
+#     CLOUDFLARED_VERSION to pin it, or leave it and let the container's weekly
+#     updater take over after the first boot
+#
+# The Hermes Agent is unaffected by any of this: it is installed at first boot
+# either way, so it is always the current release.
+#
+#   docker compose -f docker-compose.build.yml up -d --build
+#
+# What you trade away: the build takes several minutes instead of a pull, two
+# people building the same day can end up with different images, and an upstream
+# regression lands on you without warning. If you want a machine you can reason
+# about, use docker-compose.yml.
+
+services:
+  desktop:
+    build:
+      context: .
+      pull: true
+      args:
+        BASE_IMAGE: lscr.io/linuxserver/webtop:ubuntu-xfce
+        SELKIES_VERSION: latest
+    image: local/webtop-ubuntu-xfce-hermes-desktop:built
+    container_name: webtop-hermes
+    restart: unless-stopped
+    environment:
+      - PUID=10000
+      - PGID=10000
+      - CUSTOM_USER=admin
+      - PASSWORD=changeme
+      - TITLE=Webtop Ubuntu XFCE
+      - SELKIES_ENABLE_SHARING=false
+      - CLOUDFLARE_TUNNEL_TOKEN=
+    volumes:
+      - ./config:/config
+      - ./shared:/shared
+    ports:
+      - "3001:3001"
+      - "3000:3000"
+    shm_size: 2gb

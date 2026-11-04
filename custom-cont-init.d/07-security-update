@@ -1,0 +1,39 @@
+#!/usr/bin/with-contenv bash
+# =============================================================================
+# 07-security-update — put the patches a recreate erased back on the box
+# =============================================================================
+# Everything installed into the container layer is discarded when a container is
+# recreated (image update, compose change), which is the same reason 05-packages
+# re-verifies its binaries. Security patches are subject to exactly that: a buyer
+# who updates to a new image starts from the base image's patch level again, and
+# whatever the boot-time apt run had applied is simply gone.
+#
+# So this re-applies them at every boot, and it does it DETACHED on purpose:
+# LinuxServer's init-custom-files is sequential and init-services waits for it, so
+# a 900-second apt run here would hold the desktop hostage at every start. The
+# delay lets XFCE and Selkies come up first, so the buyer sees a desktop and not a
+# spinner; the patches land a couple of minutes later and are picked up by the
+# next process that starts.
+#
+# The daily cron line (17-security-update-cron) covers the far more common case:
+# a machine that simply keeps running for weeks.
+#
+# Output: the updater prints only when it FAILS, so a successful boot stays quiet.
+set -u
+
+UPDATER=/usr/local/bin/aoio-security-update
+LOG=/config/logs/security-update.log
+
+[[ -x "$UPDATER" ]] || { echo "security-update: $UPDATER missing, nothing to schedule"; exit 0; }
+
+# The log directory belongs to the seed payload, which is copied three hook
+# numbers later (10-seed-config) — so on a first boot it does not exist yet and a
+# redirect here fails with "No such file or directory", dropping the background
+# run entirely. Found in the throwaway container, not by reading the code.
+mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
+
+# setsid + nohup: survive the hook's own shell exiting. stdin closed so it can
+# never block on a prompt.
+setsid nohup bash -c "sleep 120; $UPDATER" >>"$LOG" 2>&1 </dev/null &
+echo "security-update: patch run scheduled 2 minutes after boot (detached)"
+exit 0

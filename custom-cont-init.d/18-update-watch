@@ -1,0 +1,42 @@
+#!/usr/bin/with-contenv bash
+# 18-update-watch — put the update watcher's cron line on the buyer's machine.
+#
+# WHY: when a newer cloud computer image is published, the owner should hear it
+# in their own chat — once, in plain English, pointing at the Guide's update
+# section — and should hear nothing at all otherwise. The watcher compares the
+# published image digest with the last one it saw; a change means a new version.
+#
+# WHY THIS FILE, RATHER THAN DOCUMENTATION: it must work for a buyer who never
+# reads an instruction. It runs at boot, appends the line only when it is absent
+# (so a buyer's own edits survive), and sorts BEFORE 20-crontab-install so the
+# crontab it edits is the one that gets installed.
+set -u
+CRONTAB=/config/crontabs/abc
+# Weekly, two days after the seller's own rebuild check so a fresh release is
+# already published. Silent unless the published digest has moved.
+LINE='15 1 * * 3 HOME=/config PATH=/usr/local/bin:/usr/bin:/bin /usr/local/bin/aoio-update-watch >/dev/null 2>&1'
+COMMENT='# Tells the owner in chat when a newer cloud computer is published. Silent otherwise.'
+
+[[ -f "$CRONTAB" ]] || { echo "update-watch: $CRONTAB not found, nothing to do"; exit 0; }
+[[ -x /usr/local/bin/aoio-update-watch ]] || { echo "update-watch: watcher not installed, skipping"; exit 0; }
+
+if grep -qxF "$LINE" "$CRONTAB"; then
+  echo "update-watch: cron line already current"
+  exit 0
+fi
+
+if grep -q 'aoio-update-watch' "$CRONTAB"; then
+  # An older line (a daily schedule, say) is REPLACED, not left in place: this is
+  # how a machine that is already running moves to the current schedule.
+  grep -v -e 'aoio-update-watch' -e 'newer cloud computer is published' "$CRONTAB" >"$CRONTAB.new" \
+    && cat "$CRONTAB.new" >"$CRONTAB" && rm -f "$CRONTAB.new"
+  printf '%s\n%s\n' "$COMMENT" "$LINE" >>"$CRONTAB"
+  echo "update-watch: cron line replaced with the weekly schedule"
+  exit 0
+fi
+
+{
+  printf '\n%s\n' "$COMMENT"
+  printf '%s\n' "$LINE"
+} >>"$CRONTAB"
+echo "update-watch: cron line added (Wednesdays 01:15 UTC = 09:15 SGT)"

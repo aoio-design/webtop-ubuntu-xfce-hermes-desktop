@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# =============================================================================
+# aoio-security-update — apply Ubuntu SECURITY updates only
+# =============================================================================
+# WHY THIS EXISTS
+# The image is built from a LinuxServer base that is days to weeks old by the
+# time a buyer pulls it, and the desktop it starts then runs 24/7 for weeks
+# afterwards, reachable from the internet through its own tunnel. Without this,
+# a libssl / openssh / nginx advisory sits unpatched and the only path to a fix
+# is an operator rebuild — which nobody performs on a machine they are happily
+# using.
+#
+# WHAT IT DELIBERATELY DOES NOT DO
+# Feature upgrades. A working desktop that silently moves to a new library
+# version is a worse trade than a patch delay, and non-security updates reach
+# buyers anyway through LinuxServer's base rebuilds — the seller's weekly
+# components check watches that digest and stages a candidate when it moves.
+#
+# WHY NOT JUST "ENABLE unattended-upgrades"
+#   * There is no systemd here (PID 1 is s6-svscan), so apt-daily.timer does not
+#     exist and the stock periodic mechanism would never fire. It is driven from
+#     this machine's own cron instead.
+#   * The container layer is thrown away on recreate, so anything installed here
+#     is gone after the next image update. That is why it runs at boot as well as
+#     daily: the boot run re-applies what the recreate erased.
+#   * A library already mapped into a running process stays stale until that
+#     process restarts. Nothing here can change that; it is stated so nobody
+#     reads "patched" as "the running desktop is now using the patched code".
+#
+# SILENCE IS SUCCESS
+# Prints nothing when there was nothing to do AND nothing when it patched
+# successfully (the detail goes to the log). It prints only when it could not do
+# its job — a machine that quietly lost its patcher is exactly the failure this
+# is here to prevent.
+#
+# USAGE
+#   aoio-security-update              # check and apply security updates
+#   aoio-security-update --dry-run    # say what it would do, change nothing
+# =============================================================================
+
+set -u
+
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+LOG_DIR=/config/logs
+LOG="$LOG_DIR/security-update.log"
+CONF=/etc/apt/apt.conf.d/51aoio-security-only
+DRY=0
+[ "${1:-}" = "--dry-run" ] && DRY=1
+
+log() {
+  mkdir -p "$LOG_DIR" 2>/dev/null || true
+  printf '%s %s\n' "$(date -Is)" "$*" >>"$LOG" 2>/dev/null || true
+}
+
+# A message for the owner's chat. Only ever called on failure.
+fail() {
+  log "FAILED: $*"
+  printf 'security patch: %s\n' "$*"
+  exit 0
+}
+
+# --- the patcher itself ------------------------------------------------------
+command -v unattended-upgrade >/dev/null 2>&1 \
+  || fail "unattended-upgrade is missing on this machine, so security patches are NOT being applied (the image lost it — rebuild or reinstall the package)"
+
+# --- security pocket only ----------------------------------------------------
+# Written on every run, not baked: the container layer is replaced on recreate,
+# and a config that silently reverted would leave every pocket enabled.
+# Origins-Pattern REPLACES the stock Allowed-Origins list in 50unattended-upgrades.
+# Adding to that list would leave the release/updates pockets in play, which is
+# the thing this file exists to prevent.
+read -r -d '' CONF_BODY <<'EOF' || true
+// Written by aoio-security-update. Security pocket only.
+Unattended-Upgrade::Origins-Pattern {
+        "origin=Ubuntu,archive=${distro_codename}-security";
+        "origin=Ubuntu,a=${distro_codename}-security";
+        "site=security.ubuntu.com";
+};
+// A kernel or bootloader install inside a container buys nothing and costs
+// disk: the host kernel is what actually runs.
+Unattended-Upgrade::Package-Blacklist {
+        "linux-image-";
+        "linux-headers-";
+        "linux-generic";
+        "grub";
+};
+Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+Unattended-Upgrade::MinimalSteps "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "false";
+Unattended-Upgrade::Automatic-Reboot "false";
+// Never stop to ask about a conffile nobody is watching.
+DPkg::Options {
+        "--force-confdef";
+        "--force-confold";
+};
+EOF
+
+if [ ! -f "$CONF" ] || [ "$(cat "$CONF" 2>/dev/null)" != "$CONF_BODY" ]; then
+  printf '%s\n' "$CONF_BODY" >"$CONF" 2>/dev/null \
+    || fail "could not write $CONF (are we root?)"
+  log "wrote $CONF"
+fi
+
+# --- refresh the package lists ----------------------------------------------
+if ! OUT=$(timeout 240 apt-get update -qq 2>&1); then
+  log "apt-get update output: ${OUT:0:400}"
+  fail "could not refresh the package lists (no network?), so nothing was patched this run"
+fi
+
+# --- apply -------------------------------------------------------------------
+ARGS=(-v)
+[ "$DRY" -eq 1 ] && ARGS+=(--dry-run)
+
+OUT=$(timeout 900 unattended-upgrade "${ARGS[@]}" 2>&1)
+RC=$?
+log "run rc=$RC dry=$DRY"
+printf '%s\n' "$OUT" | tail -40 >>"$LOG" 2>/dev/null || true
+
+if [ "$RC" -ne 0 ]; then
+  # 1 = "nothing to do" is a normal exit path in some versions; distinguish it
+  # from a real failure rather than alarming about a quiet week.
+  [ "$RC" -eq 1 ] && exit 0
+  fail "unattended-upgrade failed (rc=$RC) — see $LOG"
+fi
+
+PKGS=$(printf '%s\n' "$OUT" | sed -n 's/.*Packages that will be upgraded: //p' | tail -1)
+if [ -n "${PKGS:-}" ]; then
+  COUNT=$(printf '%s\n' "$PKGS" | wc -w)
+  log "applied/pending $COUNT package(s): $PKGS"
+  [ "$DRY" -eq 1 ] && printf 'security patch (dry run): would apply %s update(s): %s\n' "$COUNT" "$PKGS"
+else
+  log "nothing to apply"
+  # A dry run always answers, even with "nothing": it is the flag used to CHECK
+  # this mechanism (the build smoke test asserts on it), so silence would be
+  # indistinguishable from a broken run.
+  [ "$DRY" -eq 1 ] && printf 'security patch (dry run): would apply 0 update(s) (nothing pending)\n'
+fi
+
+exit 0

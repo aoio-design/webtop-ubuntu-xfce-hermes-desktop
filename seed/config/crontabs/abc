@@ -1,0 +1,35 @@
+# /config/crontabs/abc — the machine's own cron. Installed for abc at every
+# container start by custom-cont-init.d/20-crontab-install.
+#
+# WHY THIS FILE EXISTS: LinuxServer only imports /config/crontabs/<user> when the
+# image ALSO ships a default for that user. This base ships neither
+# /defaults/crontabs nor /etc/crontabs, so a crontab written here by hand is
+# never imported and the box silently stops running its scheduled jobs after any
+# recreate. Installing it from a boot hook closes that gap.
+#
+# TIME ZONE: /etc/localtime is UTC in this container, so a time-based schedule
+# here is read in UTC, not the owner's local time. Write the UTC equivalent.
+#
+# WHAT BELONGS HERE — and what does not
+#
+#   Hermes is NOT installed by this image: the owner installs it themselves with
+#   the official installer, and IMPORTANTLY, the agent's own scheduled work does
+#   NOT belong here. Hermes runs its own scheduler inside the gateway (its cron
+#   jobs fire because the gateway is running), and the gateway is supervised by
+#   the container's init — see custom-cont-init.d/40-hermes-glue. Adding a
+#   `hermes cron tick` line here would be a second, conflicting scheduler.
+#
+#   This file is for MACHINE-level jobs only: things that must work even if the
+#   agent is never installed. There is exactly one, below.
+#
+# The owner's agent may append its own MACHINE-level lines at the END of this
+# file. Never rewrite the lines above: they are the image's contract.
+
+# Cloudflare Tunnel crash recovery. The boot hook (25-cloudflared-tunnel) starts
+# the connector and the watchdog re-starts it within a minute if it exits. The
+# script is a no-op when no token file exists, and never logs secrets.
+* * * * * /usr/local/bin/aoio-cloudflared-watchdog >/dev/null 2>&1
+
+# ---------------------------------------------------------------------------
+# Machine-level jobs added later go BELOW this line.
+# ---------------------------------------------------------------------------

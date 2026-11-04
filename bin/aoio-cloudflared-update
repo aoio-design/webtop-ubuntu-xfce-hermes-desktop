@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# aoio-cloudflared-update — keep the buyer's connector current without touching
+# the image.
+#
+# Once a day from the machine's own cron. In order:
+#   1. ask GitHub for the newest cloudflared release tag;
+#   2. do nothing when the volume copy is already that version (the common case);
+#   3. download the release binary and check it against the SHA256 published in
+#      that release's own notes, then prove the new binary runs;
+#   4. keep the working copy as cloudflared.prev, swap the new one in, restart
+#      the connector, and wait for it to register with Cloudflare;
+#   5. if it does not register, put cloudflared.prev back and start that.
+#
+# SILENT BY DEFAULT. It prints only when a person needs to know: the new version
+# did not work (reverted), or the revert itself is not connecting. Its cron line
+# runs it through cron-notify.sh, so a printed line becomes one chat message and
+# silence stays silent. Everything else lands in /config/.cloudflared/update.log.
+#
+# Safety, in order of what could go wrong:
+#   * a bad download is rejected by checksum before anything is replaced;
+#   * the working binary is kept, never deleted;
+#   * the update only runs while holding the watchdog's lock, so the watchdog
+#     cannot start a second connector halfway through;
+#   * a version that failed once is remembered and not retried daily;
+#   * the image's own copy remains as the last-resort fallback (12-cloudflared-volume).
+set -u
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+VOL=/config/bin/cloudflared
+IMG=/usr/bin/cloudflared
+PREV=/config/bin/cloudflared.prev
+TOKEN_FILE=/config/.cloudflared/tunnel-token
+LOCK_FILE=/config/.cloudflared/watchdog.lock
+LOG=/config/.cloudflared/update.log
+START_LOG=/config/.cloudflared/connector-start.log
+SKIP=/config/.cloudflared/update-skipped
+API=https://api.github.com/repos/cloudflare/cloudflared/releases/latest
+MATCH='[t]unnel.*run.*--token-file /config/.cloudflared/tunnel-token'
+
+log() { { printf '%s %s\n' "$(date -Is)" "$*" >>"$LOG"; } 2>/dev/null || true; }
+ver() { "$1" --version 2>/dev/null | awk '{print $3}'; }
+
+# /config/.cloudflared is created by the tunnel hook only when a token is
+# configured, so a machine without a tunnel would otherwise fail to log (and the
+# shell's own redirection error would reach the chat). Create it first.
+mkdir -p /config/.cloudflared 2>/dev/null
+chown abc:abc /config/.cloudflared 2>/dev/null
+chmod 700 /config/.cloudflared 2>/dev/null
+
+# --- current state -----------------------------------------------------------
+if [[ ! -x "$VOL" ]] || [[ -z "$(ver "$VOL")" ]]; then
+  cp -f "$IMG" "$VOL" 2>/dev/null && chown abc:abc "$VOL" 2>/dev/null && chmod 755 "$VOL"
+fi
+[[ -x "$VOL" ]] || { log "no usable cloudflared binary at $VOL"; exit 0; }
+CUR="$(ver "$VOL")"
+
+# --- newest release ----------------------------------------------------------
+API_JSON="$(curl -fsSL -m 30 -H 'User-Agent: aoio-cloudflared-update' "$API" 2>/dev/null)" || {
+  log "release lookup failed (network or GitHub); nothing changed"; exit 0; }
+LATEST="$(printf '%s' "$API_JSON" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
+SHA="$(printf '%s' "$API_JSON" | grep -o 'cloudflared-linux-amd64: [a-f0-9]\{64\}' | head -1 | awk '{print $2}')"
+[[ -n "$LATEST" ]] || { log "release lookup returned no tag; nothing changed"; exit 0; }
+[[ "$CUR" == "$LATEST" ]] && { log "current ($CUR) is the newest release"; exit 0; }
+
+# Only ever move forward.
+NEWEST="$(printf '%s\n%s\n' "$CUR" "$LATEST" | sort -V | tail -1)"
+[[ "$NEWEST" == "$LATEST" ]] || { log "volume copy $CUR is ahead of upstream $LATEST; nothing changed"; exit 0; }
+
+# A version that already failed on this machine is not retried every day.
+if [[ -f "$SKIP" ]] && [[ "$(cat "$SKIP" 2>/dev/null)" == "$LATEST" ]]; then
+  log "$LATEST failed here before; waiting for the next release"; exit 0
+fi
+
+# --- download and verify -----------------------------------------------------
+TMP="$(mktemp /config/bin/.cloudflared-new.XXXXXX 2>/dev/null)" || { log "cannot write to /config/bin"; exit 0; }
+cleanup() { rm -f "$TMP"; }
+trap cleanup EXIT
+
+curl -fsSL -m 180 -o "$TMP" \
+  "https://github.com/cloudflare/cloudflared/releases/download/$LATEST/cloudflared-linux-amd64" 2>/dev/null || {
+  log "download of $LATEST failed; nothing changed"; exit 0; }
+
+if [[ -z "$SHA" ]]; then
+  log "no published checksum in the $LATEST notes; refusing to install it"; exit 0
+fi
+if ! printf '%s  %s\n' "$SHA" "$TMP" | sha256sum -c - >/dev/null 2>&1; then
+  log "checksum mismatch for $LATEST; nothing changed"; exit 0
+fi
+
+chmod 755 "$TMP" 2>/dev/null
+NEWV="$(ver "$TMP")"
+[[ "$NEWV" == "$LATEST" ]] || { log "downloaded binary reports '$NEWV', expected $LATEST; nothing changed"; exit 0; }
+log "verified $LATEST (sha256 ok); starting the swap from $CUR"
+
+# --- swap, restart, prove it -------------------------------------------------
+exec 9>"$LOCK_FILE" || { log "cannot open the watchdog lock; nothing changed"; exit 0; }
+flock -n 9 || { log "watchdog is busy; will try again tomorrow"; exit 0; }
+
+ready() {   # $1 = log file, $2 = seconds to wait
+  local i
+  for ((i = 0; i < $2 * 2; i++)); do
+    grep -qi 'Registered tunnel connection' "$1" 2>/dev/null && return 0
+    sleep 0.5
+  done
+  return 1
+}
+stop_connector() {
+  local i
+  # Match on the token-file path rather than the owning user: whichever account
+  # started the connector, that exact process is the one to stop.
+  pkill -f "$MATCH" 2>/dev/null
+  for ((i = 0; i < 20; i++)); do
+    pgrep -f "$MATCH" >/dev/null 2>&1 || return 0
+    sleep 0.5
+  done
+}
+start_connector() {
+  : >"$START_LOG"; chmod 600 "$START_LOG" 2>/dev/null
+  setsid "$VOL" tunnel run --token-file "$TOKEN_FILE" 9>&- </dev/null \
+    >"$START_LOG" 2>&1 &
+}
+
+cp -f "$VOL" "$PREV" 2>/dev/null || { log "cannot keep a copy of $CUR; nothing changed"; exit 0; }
+chown abc:abc "$PREV" 2>/dev/null
+mv -f "$TMP" "$VOL" 2>/dev/null || { log "cannot replace $VOL; nothing changed"; exit 0; }
+chown abc:abc "$VOL" 2>/dev/null
+chmod 755 "$VOL" 2>/dev/null
+trap - EXIT
+
+# No tunnel configured: keep the newer binary on the volume, restart nothing.
+if [[ ! -s "$TOKEN_FILE" ]]; then
+  log "updated $CUR -> $LATEST (no tunnel configured; takes effect at next start)"; exit 0
+fi
+
+stop_connector
+start_connector
+if ready "$START_LOG" 60; then
+  log "updated $CUR -> $LATEST; connector registered"; exit 0
+fi
+
+# --- revert ------------------------------------------------------------------
+log "$LATEST did not register within 60s; reverting to $CUR"
+stop_connector
+if [[ -x "$PREV" ]]; then
+  mv -f "$PREV" "$VOL" 2>/dev/null
+  chown abc:abc "$VOL" 2>/dev/null
+  chmod 755 "$VOL" 2>/dev/null
+fi
+start_connector
+if ready "$START_LOG" 60; then
+  printf '%s\n' "$LATEST" >"$SKIP" 2>/dev/null
+  printf 'A Cloudflare connector update (%s) did not work on this machine, so it was put back to %s. Nothing else changed, and it will not be retried.\n' "$LATEST" "$CUR"
+  exit 0
+fi
+
+printf 'The Cloudflare connector update (%s) failed AND the rollback to %s is not connecting. Your desktop may be unreachable from outside. Tell your agent: "my tunnel is down".\n' "$LATEST" "$CUR"
+# Remember the failure in this branch too, so a machine that is already in
+# trouble is not retried — and messaged again — every single day.
+printf '%s\n' "$LATEST" >"$SKIP" 2>/dev/null
+exit 0

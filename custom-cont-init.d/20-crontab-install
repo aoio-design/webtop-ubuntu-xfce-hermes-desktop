@@ -1,0 +1,42 @@
+#!/usr/bin/with-contenv bash
+# Install the agent's crontab at every container start, and make sure the cron
+# daemon is actually running.
+#
+# WHY THIS FILE EXISTS
+# LinuxServer's own crontab importer only reads /config/crontabs/<user> when the
+# image ALSO ships a default for that user (/defaults/crontabs/<user>). This image
+# ships neither /defaults/crontabs nor /etc/crontabs, so a crontab written to
+# /config/crontabs was never imported — it survived on the volume but was invisible
+# to cron, and after any recreate the box silently stopped running its scheduled
+# jobs. Installing it here closes that gap.
+#
+# The second half matters for the same reason: svc-cron starts the daemon only if a
+# crontab exists at the moment it starts, otherwise it sleeps forever. So install
+# first, and kick the service if it already made that decision.
+#
+# Copied VERBATIM from the live box (/docker/cloud-computer/custom-cont-init.d/
+# 30-crontab-install, 26 Sep 2026 Option A cutover) — only the filename changed so
+# it sorts after the seed hook that creates /config/crontabs/abc. The logic itself
+# is deliberately byte-identical: it is the fix for a bug that cost the live box a
+# day of silently-dropped scheduled work, and re-deriving it would re-open it.
+
+set -u
+
+CRONTAB_SRC=/config/crontabs/abc
+CRON_USER=abc
+
+[[ -f "$CRONTAB_SRC" ]] || { echo "crontab-install: $CRONTAB_SRC not found, nothing to do"; exit 0; }
+
+crontab -u "$CRON_USER" "$CRONTAB_SRC" \
+  && echo "crontab-install: installed $CRONTAB_SRC for $CRON_USER" \
+  || echo "crontab-install: FAILED to install $CRONTAB_SRC"
+
+# svc-cron may have started before this hook and gone to sleep because there was no
+# crontab yet; restart it so it re-checks now that there is one.
+if ! pgrep -x cron >/dev/null 2>&1; then
+  s6-svc -r /run/service/svc-cron 2>/dev/null \
+    && echo "crontab-install: kicked svc-cron" \
+    || echo "crontab-install: svc-cron not up yet (it will see the crontab when it starts)"
+fi
+
+exit 0

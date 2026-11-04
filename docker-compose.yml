@@ -1,0 +1,71 @@
+# =============================================================================
+# Webtop Ubuntu XFCE + Hermes Agent Desktop
+# =============================================================================
+# Quick start:
+#
+#   mkdir -p config shared
+#   docker compose up -d
+#   docker compose logs -f          # watch the first boot
+#
+# Then open  https://<your-server>:3001  and sign in.
+#
+# Two values you should set before you expose this to the internet:
+#   1. CUSTOM_USER — your desktop login name
+#   2. PASSWORD    — your password (at least 12 characters)
+#
+# If you leave PASSWORD as it is, the image does not keep the placeholder: the
+# boot hook `08-desktop-password` generates a strong one and writes it to
+# config/.desktop-password. Set a real password and it leaves it alone.
+#
+# The Hermes Agent installs itself on the first boot, in the background, into the
+# mounted ./config folder. Watch it with:
+#
+#   docker compose exec desktop tail -f /config/logs/firstboot.log
+#
+# Published image:
+#   ghcr.io/aoio-design/webtop-ubuntu-xfce-hermes-desktop
+# Want the newest upstream base and streamer at deploy time instead of the
+# published image? Use docker-compose.build.yml (it builds from this repo).
+
+services:
+  desktop:
+    image: ${WEBTOP_IMAGE:-ghcr.io/aoio-design/webtop-ubuntu-xfce-hermes-desktop:latest}
+    container_name: webtop-hermes
+    restart: unless-stopped
+    environment:
+      - PUID=10000
+      - PGID=10000
+      - CUSTOM_USER=admin          # <-- your desktop login name
+      - PASSWORD=changeme          # <-- your password; a placeholder is replaced at boot
+      - TITLE=Webtop Ubuntu XFCE
+      # Session-sharing links carry no authentication of their own and grant the
+      # same power as the primary user, including a terminal with passwordless
+      # sudo inside the container — so they stay off. The login is nginx basic
+      # auth with CUSTOM_USER/PASSWORD above.
+      - SELKIES_ENABLE_SHARING=false
+      # Optional remote access. Create a remote-managed Tunnel and a Cloudflare
+      # Access application, then paste its token here. Empty = the connector is
+      # not started and the image publishes no ports of its own.
+      - CLOUDFLARE_TUNNEL_TOKEN=
+      # HERMES_HOME is deliberately not set: the agent's home is /config/.hermes,
+      # on the volume below, which is also what the image's launcher expects. Set
+      # it only to move the agent home somewhere you mount yourself.
+    volumes:
+      # The desktop's home: settings, Desktop/Downloads, the crontab, the agent's
+      # home at /config/.hermes, and its source checkout at /config/hermes-agent.
+      # This is the directory to back up.
+      - ./config:/config
+      # A folder both the desktop user and any agent can read and write.
+      - ./shared:/shared
+    ports:
+      # 3001 is HTTPS with a self-signed certificate (your browser will warn
+      # once). 3000 is plain HTTP — handy behind your own reverse proxy that
+      # terminates TLS, and not something to leave open on a public address:
+      # basic-auth credentials would cross the wire in clear.
+      - "3001:3001"
+      - "3000:3000"
+    # Chromium and the desktop need more shared memory than the 64 MB default.
+    shm_size: 2gb
+    # No /var/run/docker.sock: the desktop user has passwordless sudo INSIDE the
+    # container, so mounting the socket would hand host root to anyone who
+    # reaches the screen.
