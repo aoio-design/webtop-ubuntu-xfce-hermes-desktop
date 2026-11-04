@@ -67,7 +67,7 @@ Two short steps, once:
 
 Everything both steps create lives on the mounted volume and survives updates.
 
-## First boot, in plain words
+## First boot
 
 Two things happen at once when the container starts:
 
@@ -101,8 +101,6 @@ self-signed) and `3000` (plain HTTP, for your own TLS-terminating proxy).
 memory than Docker's 64 MB default.
 
 ## How each part stays current
-
-This is the part most desktop images get wrong, so here it is explicitly:
 
 | Part | Source | How it stays current |
 |---|---|---|
@@ -140,17 +138,6 @@ image also checks the registry weekly and can message you (through the agent's
 Telegram) when a newer version is published; it says nothing otherwise.
 
 The agent updates on its own schedule: `hermes update`.
-
-## Build it yourself
-
-```bash
-./build.sh
-```
-
-`build.sh` resolves the upstream base to today's digest and pins it, so the build
-is the newest base as of now *and* reproducible afterwards. If you would rather
-have everything resolved at deploy time, use `docker-compose.build.yml` instead —
-it takes the floating upstream tag and the newest Selkies release.
 
 ## Security notes
 
