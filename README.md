@@ -54,6 +54,19 @@ The desktop is usable in under a minute. The agent takes a few minutes longer
 (about 1 GB of download and a desktop-app build) and then appears on the desktop,
 already running at your next login.
 
+### After the agent finishes installing
+
+The agent is installed, not configured — it has no API keys and no profile yet.
+Two short steps, once:
+
+1. Open **Hermes Agent** on the desktop and complete its first-run setup (it asks
+   for your model provider and key).
+2. In a terminal on the desktop, run `hermes gateway install` so the agent's
+   gateway is supervised by the container's init and comes back by itself after a
+   restart or a container update.
+
+Everything both steps create lives on the mounted volume and survives updates.
+
 ## First boot, in plain words
 
 Two things happen at once when the container starts:
