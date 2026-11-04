@@ -30,7 +30,7 @@ cd "$(dirname "$0")"
 IMAGE="${IMAGE:-webtop-hermes:dev}"
 BASE_TAG="${BASE_TAG:-lscr.io/linuxserver/webtop:ubuntu-xfce}"
 CLOUDFLARED_VERSION="${CLOUDFLARED_VERSION:-2026.10.1}"
-SELKIES_VERSION="${SELKIES_VERSION:-2.2.0}"
+SELKIES_VERSION="${SELKIES_VERSION:-2.2.1}"
 IMAGE_REVISION="${IMAGE_REVISION:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}"
 
 # Resolve the floating tag to the digest it points at RIGHT NOW, and pin that —
