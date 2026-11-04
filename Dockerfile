@@ -40,8 +40,8 @@
 #      upstream, which is both cleaner and always correct.
 #
 #   The cost is honest: on first boot the desktop is up in under a minute and the
-#   agent arrives behind it, several minutes later (about 1 GB of download plus a
-#   desktop-app build). Watch it with:
+#   agent arrives behind it, a few minutes later (measured: ~4.5 minutes, about
+#   2.5 GB on disk). Watch it with:
 #
 #       docker exec -it webtop-hermes tail -f /config/logs/firstboot.log
 #
