@@ -62,7 +62,7 @@ FROM ${BASE_IMAGE}
 # this the build-info file and the io.aoio.base.image label record an empty base.
 ARG BASE_IMAGE
 ARG CLOUDFLARED_VERSION=2026.10.1
-ARG SELKIES_VERSION=2.2.0
+ARG SELKIES_VERSION=2.2.1
 ARG IMAGE_REVISION=unknown
 
 LABEL org.opencontainers.image.title="Webtop Ubuntu XFCE + Hermes Agent Desktop" \
