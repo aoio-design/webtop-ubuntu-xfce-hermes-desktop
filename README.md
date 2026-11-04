@@ -8,6 +8,8 @@ installed for you on first boot.
 No VNC client, no RDP, no VPN, nothing to install on the machine you are sitting
 at.
 
+![The desktop in a browser: the Hermes Agent app and Chromium side by side](docs/desktop.png)
+
 ```
 docker pull ghcr.io/aoio-design/webtop-ubuntu-xfce-hermes-desktop:latest
 ```
