@@ -47,6 +47,19 @@ CONF=/etc/apt/apt.conf.d/51aoio-security-only
 DRY=0
 [ "${1:-}" = "--dry-run" ] && DRY=1
 
+# --- escalate before doing anything ------------------------------------------
+# The daily run comes from the desktop user's crontab (abc), and apt plus
+# /etc/apt need root. Without this the daily run never patched anything — it
+# only ever printed "could not write ... (are we root?)", which on a machine
+# with no Telegram configured is a line in a log nobody reads. The base image
+# gives abc passwordless sudo (%sudo NOPASSWD), so re-exec under it; if sudo is
+# unavailable the script carries on and fails loudly rather than silently.
+if [ "$(id -u)" -ne 0 ]; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    exec sudo -n "$0" "$@"
+  fi
+fi
+
 log() {
   mkdir -p "$LOG_DIR" 2>/dev/null || true
   printf '%s %s\n' "$(date -Is)" "$*" >>"$LOG" 2>/dev/null || true
