@@ -1,8 +1,76 @@
 # Changelog
 
-All notable changes to this project are recorded here. The project was created and
-first published on 4 November 2026; the entries below are the full record of that
-first day.
+All notable changes to this project are recorded here, newest first. The project was
+created and first published on 4 November 2026; the v1.0.0 entry below is the full
+record of that first day.
+
+---
+
+## 2026-11-23
+
+Image: `ghcr.io/aoio-design/webtop-ubuntu-xfce-hermes-desktop:2026-11-23` (= `latest`)
+Digest: `sha256:e7225990afe96ec1a70d78518103739036fe7080ce355fe5c1216ffd8d7b5803`
+Platform: `linux/amd64` · Licence: GPL-3.0
+
+### Changed
+
+- **Base** moved to `lscr.io/linuxserver/webtop:ubuntu-xfce@sha256:25c0d9cae36f…`
+  (LinuxServer `d5ef6218-ls11`, built 17 November 2026) — upstream's own package
+  refresh on Ubuntu 26.04.1.
+- **cloudflared** 2026.10.1 → **2026.11.1**. Both declaring files move together:
+  the `Dockerfile`'s `ARG CLOUDFLARED_VERSION` and `build.sh`'s environment default,
+  because `build.sh` passes `--build-arg` from its own value. The baked copy is only
+  the seed — `19-cloudflared-update` plus the machine schedule keep the connector
+  current afterwards.
+- Selkies stays at 2.2.1 (the newest PyPI release). No boot hook, seed file or
+  compose change: a pull and a recreate is the whole update.
+
+### Verified
+
+| Check | Result |
+|---|---|
+| Desktop answers over HTTPS with 401 (auth gate up) | PASS |
+| Selkies browser client present and served (`assets/index-BD8uW1M7.js`) | PASS |
+| Seeded crontab, cloudflared on the volume, cloudflared updater on the schedule, security updater + schedule | 4 PASS |
+| Hermes absent, no studio tree (this image installs the agent at first boot) | PASS |
+| Baked build info and image labels | base `25c0d9ca…` · selkies 2.2.1 · cloudflared 2026.11.1 |
+| `cloudflared --version` inside the image | `2026.11.1` |
+| Anonymous `docker pull` (no credentials) | 200, digest `e7225990…` |
+
+### Updating
+
+`docker compose pull && docker compose up -d`. Everything you added lives on the
+mounted volumes and survives; do not use `down -v`.
+
+---
+
+## 2026-11-10
+
+Image: `ghcr.io/aoio-design/webtop-ubuntu-xfce-hermes-desktop:2026-11-10`
+Digest: `sha256:102299402ed7167a682031ef6544a0d436a5a20f4b8913c5d9d07390d0fffdb1`
+Platform: `linux/amd64` · Licence: GPL-3.0
+
+### Fixed
+
+- **The daily security patch run patched nothing.** The machine schedule runs it as
+  the desktop user (`abc`), while `apt` and `/etc/apt` need root, so every run printed
+  `could not write … (are we root?)` and exited — silently on any machine with no chat
+  notification configured. `bin/aoio-security-update` now re-executes itself under
+  `sudo -n` when it is not root (this base grants `abc` passwordless sudo) and fails
+  loudly if it cannot escalate, instead of appearing to have run.
+
+### Changed
+
+- **Base** moved to `lscr.io/linuxserver/webtop:ubuntu-xfce@sha256:14fa1ceb750d…`
+  (LinuxServer `76362218-ls10`) — upstream's Ubuntu 26.04.1 package refresh.
+- Selkies 2.2.1 and cloudflared 2026.10.1, unchanged from the 4 November rebuild.
+
+### Verified
+
+- Image labels read back from the published artifact: `io.aoio.base.image`
+  `14fa1ceb…`, `io.aoio.selkies.version` 2.2.1, `io.aoio.cloudflared.version`
+  2026.10.1.
+- Anonymous `docker pull` (no credentials): 200, digest `10229940…`.
 
 ---
 
