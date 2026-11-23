@@ -61,7 +61,7 @@ FROM ${BASE_IMAGE}
 # Re-declared: an ARG declared before FROM is out of scope after it, and without
 # this the build-info file and the io.aoio.base.image label record an empty base.
 ARG BASE_IMAGE
-ARG CLOUDFLARED_VERSION=2026.10.1
+ARG CLOUDFLARED_VERSION=2026.11.1
 ARG SELKIES_VERSION=2.2.1
 ARG IMAGE_REVISION=unknown
 
